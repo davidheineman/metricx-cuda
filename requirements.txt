@@ -4,3 +4,4 @@ datasets
 numpy
 sentencepiece
 protobuf
+accelerate

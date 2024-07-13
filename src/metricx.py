@@ -3,6 +3,7 @@ import transformers
 from datasets import Dataset
 from metricx23.models import MT5ForRegression
 
+
 PRETTY_METRIC_NAMES = {
     "comet": "COMET",
     "comet_20": "COMET",
@@ -15,6 +16,7 @@ PRETTY_METRIC_NAMES = {
     "metricx": "MetricX ↓",
     "metricx_qe": "MetricX QE ↓",
 }
+
 
 class AbstractMetric:
     def __init__(self, name, **kwargs):
@@ -53,6 +55,7 @@ class AbstractMetric:
     def get_endpoint_name(self):
         return 'http://localhost:{port}/' + self.name + '_eval'
 
+
 class MetricX(AbstractMetric):
     def __init__(self, variation='metricx', size='xl', batch_size=8, **kwargs):
         super().__init__(name=variation, batch_size=batch_size, requires_references=('qe' in variation), **kwargs)
@@ -72,7 +75,7 @@ class MetricX(AbstractMetric):
                 case 'xxl': model_id = "google/metricx-23-xxl-v2p0"
         if model_id is None: raise NotImplementedError(f'MetricX variation {self.name} at size {size} not supported!')
 
-        device = torch.device("cuda")
+        device = torch.device("mps")
 
         per_device_batch_size = self.batch_size # batch_size // (len(devices) if isinstance(devices, list) else devices)
 
@@ -86,8 +89,11 @@ class MetricX(AbstractMetric):
             output_dir='/dev',
             per_device_eval_batch_size=per_device_batch_size,
             dataloader_pin_memory=False,
+            use_mps_device=True
         )
         self.metric = transformers.Trainer(model=model, args=training_args)
+
+        self.metric.model.to("mps")
 
     def prepare_inputs(self, data, is_qe, max_input_length=1024):
         """
@@ -121,7 +127,7 @@ class MetricX(AbstractMetric):
         ds.set_format(
             type="torch",
             columns=["input_ids", "attention_mask"],
-            device=self.metric.model.device,
+            device="mps", # self.metric.model.device,
             output_all_columns=True,
         )
         return ds
