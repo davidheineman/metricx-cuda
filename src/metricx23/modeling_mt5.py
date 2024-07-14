@@ -3,7 +3,6 @@ import torch
 from torch import nn
 
 from transformers.modeling_utils import PreTrainedModel
-from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
 
 from .configuration_mt5 import MT5Config
 
@@ -20,24 +19,18 @@ class MT5LayerNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
         Construct a layernorm module in the MT5 style. No bias and no subtraction of mean.
+        
+        MT5 uses a layer_norm which only scales and doesn't shift, which is also known as Root Mean
+        Square Layer Normalization https://arxiv.org/abs/1910.07467 thus varience is calculated
+        w/o mean and there is no bias.
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        # MT5 uses a layer_norm which only scales and doesn't shift, which is also known as Root Mean
-        # Square Layer Normalization https://arxiv.org/abs/1910.07467 thus varience is calculated
-        # w/o mean and there is no bias. Additionally we want to make sure that the accumulation for
-        # half-precision inputs is done in fp32
-
         variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-
-        # convert into half-precision if necessary
-        if self.weight.dtype in [torch.float16, torch.bfloat16]:
-            hidden_states = hidden_states.to(self.weight.dtype)
-
         return self.weight * hidden_states
     
 
@@ -64,22 +57,6 @@ class MT5Attention(nn.Module):
             self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
         self.pruned_heads = set()
         self.gradient_checkpointing = False
-
-    def prune_heads(self, heads):
-        if len(heads) == 0:
-            return
-        heads, index = find_pruneable_heads_and_indices(
-            heads, self.n_heads, self.key_value_proj_dim, self.pruned_heads
-        )
-        # Prune linear layers
-        self.q = prune_linear_layer(self.q, index)
-        self.k = prune_linear_layer(self.k, index)
-        self.v = prune_linear_layer(self.v, index)
-        self.o = prune_linear_layer(self.o, index, dim=1)
-        # Update hyper params
-        self.n_heads = self.n_heads - len(heads)
-        self.inner_dim = self.key_value_proj_dim * self.n_heads
-        self.pruned_heads = self.pruned_heads.union(heads)
 
     @staticmethod
     def _relative_position_bucket(relative_position, bidirectional=True, num_buckets=32, max_distance=128):
@@ -183,20 +160,6 @@ class MT5Attention(nn.Module):
                 # (batch_size, n_heads, seq_length, dim_per_head)
                 hidden_states = shape(proj_layer(key_value_states))
 
-            if past_key_value is not None:
-                if key_value_states is None:
-                    # self-attn
-                    # (batch_size, n_heads, key_length, dim_per_head)
-                    hidden_states = torch.cat([past_key_value, hidden_states], dim=2)
-                elif past_key_value.shape[2] != key_value_states.shape[1]:
-                    # checking that the `sequence_length` of the `past_key_value` is the same as
-                    # the provided `key_value_states` to support prefix tuning
-                    # cross-attn
-                    # (batch_size, n_heads, seq_length, dim_per_head)
-                    hidden_states = shape(proj_layer(key_value_states))
-                else:
-                    # cross-attn
-                    hidden_states = past_key_value
             return hidden_states
 
         # get query states
@@ -220,25 +183,13 @@ class MT5Attention(nn.Module):
                 position_bias = torch.zeros(
                     (1, self.n_heads, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
                 )
-                if self.gradient_checkpointing and self.training:
-                    position_bias.requires_grad = True
             else:
                 position_bias = self.compute_bias(real_seq_length, key_length, device=scores.device)
-
-            # if key and values are already calculated
-            # we want only the last query position bias
-            if past_key_value is not None:
-                position_bias = position_bias[:, :, -hidden_states.size(1) :, :]
 
             if mask is not None:
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
-        if self.pruned_heads:
-            mask = torch.ones(position_bias.shape[1])
-            mask[list(self.pruned_heads)] = 0
-            position_bias_masked = position_bias[:, mask.bool()]
-        else:
-            position_bias_masked = position_bias
+        position_bias_masked = position_bias
 
         scores += position_bias_masked
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
@@ -248,18 +199,12 @@ class MT5Attention(nn.Module):
             attn_weights, p=self.dropout, training=self.training
         )  # (batch_size, n_heads, seq_length, key_length)
 
-        # Mask heads if we want to
-        if layer_head_mask is not None:
-            attn_weights = attn_weights * layer_head_mask
-
         attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
         attn_output = self.o(attn_output)
 
         present_key_value_state = (key_states, value_states) if (self.is_decoder and use_cache) else None
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
-        if output_attentions:
-            outputs = outputs + (attn_weights,)
         return outputs  
 
 
@@ -340,28 +285,6 @@ class NewGELUActivation(nn.Module):
         return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
 
 
-class MT5DenseActDense(nn.Module):
-    def __init__(self, config: MT5Config):
-        super().__init__()
-        self.wi = nn.Linear(config.d_model, config.d_ff, bias=False)
-        self.wo = nn.Linear(config.d_ff, config.d_model, bias=False)
-        self.dropout = nn.Dropout(config.dropout_rate)
-        self.act = NewGELUActivation() # ACT2FN[config.dense_act_fn]
-
-    def forward(self, hidden_states):
-        hidden_states = self.wi(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        if (
-            isinstance(self.wo.weight, torch.Tensor)
-            and hidden_states.dtype != self.wo.weight.dtype
-            and self.wo.weight.dtype != torch.int8
-        ):
-            hidden_states = hidden_states.to(self.wo.weight.dtype)
-        hidden_states = self.wo(hidden_states)
-        return hidden_states
-
-
 class MT5DenseGatedActDense(nn.Module):
     def __init__(self, config: MT5Config):
         super().__init__()
@@ -394,10 +317,7 @@ class MT5DenseGatedActDense(nn.Module):
 class MT5LayerFF(nn.Module):
     def __init__(self, config: MT5Config):
         super().__init__()
-        if config.is_gated_act:
-            self.DenseReluDense = MT5DenseGatedActDense(config)
-        else:
-            self.DenseReluDense = MT5DenseActDense(config)
+        self.DenseReluDense = MT5DenseGatedActDense(config)
 
         self.layer_norm = MT5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
@@ -435,22 +355,7 @@ class MT5Block(nn.Module):
         output_attentions=False,
         return_dict=True,
     ):
-        if past_key_value is not None:
-            # if not self.is_decoder:
-            #     logger.warning("`past_key_values` is passed to the encoder. Please make sure this is intended.")
-            expected_num_past_key_values = 2 if encoder_hidden_states is None else 4
-
-            if len(past_key_value) != expected_num_past_key_values:
-                raise ValueError(
-                    f"There should be {expected_num_past_key_values} past states. "
-                    f"{'2 (key / value) for cross attention. ' if expected_num_past_key_values == 4 else ''}"
-                    f"Got {len(past_key_value)} past key / value states"
-                )
-
-            self_attn_past_key_value = past_key_value[:2]
-            cross_attn_past_key_value = past_key_value[2:]
-        else:
-            self_attn_past_key_value, cross_attn_past_key_value = None, None
+        self_attn_past_key_value, cross_attn_past_key_value = None, None
 
         self_attention_outputs = self.layer[0](
             hidden_states,
@@ -495,15 +400,6 @@ class MT5Block(nn.Module):
             )
             hidden_states = cross_attention_outputs[0]
 
-            # clamp inf values to enable fp16 training
-            if hidden_states.dtype == torch.float16:
-                clamp_value = torch.where(
-                    torch.isinf(hidden_states).any(),
-                    torch.finfo(hidden_states.dtype).max - 1000,
-                    torch.finfo(hidden_states.dtype).max,
-                )
-                hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
-
             # Combine self attn and cross attn key value states
             if present_key_value_state is not None:
                 present_key_value_state = present_key_value_state + cross_attention_outputs[1]
@@ -513,15 +409,6 @@ class MT5Block(nn.Module):
 
         # Apply Feed Forward layer
         hidden_states = self.layer[-1](hidden_states)
-
-        # clamp inf values to enable fp16 training
-        if hidden_states.dtype == torch.float16:
-            clamp_value = torch.where(
-                torch.isinf(hidden_states).any(),
-                torch.finfo(hidden_states.dtype).max - 1000,
-                torch.finfo(hidden_states.dtype).max,
-            )
-            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
         outputs = (hidden_states,)
 
@@ -658,12 +545,9 @@ class MT5Stack(MT5PreTrainedModel):
         all_cross_attentions = None
 
         return tuple(
-            v
-            for v in [
-                hidden_states,
-                present_key_value_states,
-                all_hidden_states,
-                all_attentions,
-                all_cross_attentions,
-            ]
+            hidden_states,
+            present_key_value_states,
+            all_hidden_states,
+            all_attentions,
+            all_cross_attentions
         )

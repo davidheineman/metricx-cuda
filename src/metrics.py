@@ -44,7 +44,7 @@ class MetricX(Metric):
                 case 'xxl': model_id = "google/metricx-23-qe-xxl-v2p0"
         if model_id is None: raise NotImplementedError(f'MetricX variation {self.name} at size {size} not supported!')
 
-        device = torch.device("cuda")
+        device = torch.device("mps")
         self.tokenizer = AutoTokenizer.from_pretrained("google/mt5-xl", legacy=False)
 
         self.metric = MT5ForMetricX.from_pretrained(model_id)

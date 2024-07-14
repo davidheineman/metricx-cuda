@@ -20,5 +20,12 @@ def main():
 
     print(res)
 
+    return res
+
+
+def test_main():
+    res = main()
+    assert all(round(a, 10) == round(e, 10) for a, e in zip(res, [3.2230827808380127, 2.6962897777557373])), res
+
 
 if __name__ == '__main__': main()
