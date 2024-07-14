@@ -28,9 +28,6 @@ class MT5ForMetricX(MT5PreTrainedModel):
     self.decoder = MT5Stack(decoder_config, self.shared)
     self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-    # Initialize weights and apply final processing
-    self.post_init()
-
     # Model parallel
     self.model_parallel = False
     self.device_map = None

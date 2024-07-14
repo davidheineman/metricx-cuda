@@ -14,6 +14,24 @@ class MT5PreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["MT5Block"]
     _keep_in_fp32_modules = ["wo"]
+
+
+# class MT5PreTrainedModel(nn.Module):
+#     def __init__(self, config, *inputs, **kwargs):
+#         super().__init__()
+#         if not isinstance(config, MT5Config):
+#             raise ValueError("Parameter config in `{}(config)` should be an instance of class `MT5Config`. ")
+#         self.config = config
+
+#     @classmethod
+#     def from_pretrained(cls, model_name, config, *inputs, **kwargs):
+#         # Instantiate model.
+#         model = cls(config, *inputs, **kwargs)
+#         load_return = model.load_state_dict(
+#             remap_state_dict(state_dict_from_pretrained(model_name), config), strict=False
+#         )
+#         return model
+
     
 class MT5LayerNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -76,7 +94,6 @@ class MT5LayerFF(nn.Module):
     def __init__(self, config: MT5Config):
         super().__init__()
         self.DenseReluDense = MT5DenseGatedActDense(config)
-
         self.layer_norm = MT5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -433,8 +450,6 @@ class MT5Stack(MT5PreTrainedModel):
         self.final_layer_norm = MT5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
-        # Initialize weights and apply final processing
-        self.post_init()
         # Model parallel
         self.model_parallel = False
         self.device_map = None
