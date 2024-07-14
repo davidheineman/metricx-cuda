@@ -25,7 +25,9 @@ def main():
 
 def test_main():
     res = main()
-    assert all(round(a, 10) == round(e, 10) for a, e in zip(res, [3.2230827808380127, 2.6962897777557373])), res
+    # On CUDA: [3.2230851650238037, 2.6962885856628420]
+    # On MPS:  [3.2230827808380127, 2.6962897777557373]
+    assert all(round(a, 5) == round(e, 5) for a, e in zip(res, [3.2230827, 2.6962897])), res
 
 
 if __name__ == '__main__': main()
