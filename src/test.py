@@ -1,4 +1,4 @@
-from metricx import MetricX
+from metrics import MetricX
 
 src = [
     "The quick brown fox jumps over the lazy dog.",

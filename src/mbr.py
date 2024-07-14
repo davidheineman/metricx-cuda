@@ -1,9 +1,9 @@
 import numpy as np
 
-from metricx import AbstractMetric
+from metrics import Metric
 from typing import List
 
-def mbr(metric: AbstractMetric, cands: List[str], source: List[str]):
+def mbr(metric: Metric, cands: List[str], source: List[str]):
     """
     Calculate MBR using a reference-based value metric.
     """
@@ -34,7 +34,7 @@ def mbr(metric: AbstractMetric, cands: List[str], source: List[str]):
     return np.mean(score_matrix, axis=1).tolist(), score_matrix
 
 
-def rerank(metric: AbstractMetric, cands: List[str], source: List[str]):
+def rerank(metric: Metric, cands: List[str], source: List[str]):
     """
     Score a list of candidates using reference-free re-ranking
     """
