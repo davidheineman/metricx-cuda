@@ -1,7 +1,9 @@
 torch
 transformers
+accelerate
+flash-attn
+
 datasets
 numpy
 sentencepiece
 protobuf
-accelerate

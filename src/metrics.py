@@ -44,8 +44,8 @@ class MetricX(Metric):
                 case 'xxl': model_id = "google/metricx-23-qe-xxl-v2p0"
         if model_id is None: raise NotImplementedError(f'MetricX variation {self.name} at size {size} not supported!')
 
-        device = torch.device("mps")
-        self.tokenizer = AutoTokenizer.from_pretrained("google/mt5-xl", legacy=False)
+        device = torch.device("cuda")
+        self.tokenizer = AutoTokenizer.from_pretrained("google/mt5-xl", legacy=False, use_fast=True)
 
         self.metric = MT5ForMetricX.from_pretrained(model_id)
         self.metric.to(device)
@@ -53,27 +53,23 @@ class MetricX(Metric):
 
     def prepare_inputs(self, src, pred, ref, max_input_length=1024):
         """Custom function for creating a MetricX dataset class using a lists for input."""
-        def _preprocess(example):
-            # add prompt
-            if self.requires_references:
-                example["input"] = f'candidate: {example["hypothesis"]} reference: {example["reference"]}'
-            else:
-                example["input"] = f'candidate: {example["hypothesis"]} source: {example["source"]}'
-
+        def _preprocess(batch):
             # tokenize
-            example = self.tokenizer(
-                example["input"],
+            batch = self.tokenizer(
+                batch['prompt'],
                 max_length=max_input_length,
                 truncation=True,
                 padding='max_length',
-            )
+                return_tensors='pt'
+            ).to(self.metric.device)
 
             # remove EOS
-            example["input_ids"] = example["input_ids"][:-1]
-            example["attention_mask"] = example["attention_mask"][:-1]
+            batch["input_ids"] = batch["input_ids"][:, :-1]
+            batch["attention_mask"] = batch["attention_mask"][:, :-1]
 
-            return example
+            return batch
         
+        # format src/pred/ref using prompt
         data = []
         if self.requires_references:
             assert ref is not None
@@ -81,25 +77,52 @@ class MetricX(Metric):
                 if isinstance(r, list): 
                     assert len(r) == 1, f"MetricX only supports a single reference! Recieved: {r}"
                     r = r[0]
-                data += [{'source': s, 'hypothesis': p, 'reference': r}]
+                data += [{'prompt': f'candidate: {p} reference: {r}'}]
         else:
             for s, p in zip(src, pred):
-                data += [{ 'source': s, 'hypothesis': p }]
+                data += [{'prompt': f'candidate: {p} source: {s}'}]
 
+        # tokenize in batches
         ds = Dataset.from_list(data)
-        ds = ds.map(_preprocess)
+        
+        import time
+        start = time.time()
+
+        ds = ds.map(_preprocess, batched=True, batch_size=1000)
         ds.set_format(
             type="torch",
             columns=["input_ids", "attention_mask"],
             device=self.metric.device,
             output_all_columns=True,
         )
+
+        end = time.time()
+        print(f"Dataset func time: {(end - start):.4f} seconds ({(len(src)/(end - start)):.2f} sent/s)")
+
         return ds['input_ids'], ds['attention_mask']
         
     def __call__(self, src, pred, ref=None):
         input_ids, attention_mask = self.prepare_inputs(src, pred, ref)
-        
-        evaluation = self.metric.forward(input_ids, attention_mask)
 
-        return evaluation.tolist()
+        import time
+        start = time.time()
+
+        # evaluation = self.metric.forward(input_ids, attention_mask)
+        # evaluation = evaluation.tolist()
+
+        bs = 1 # self.batch_size
+        evaluation = []
+        n_batches = (len(input_ids) + bs - 1) // bs
+        for i in range(n_batches):
+            batch_input_ids      = input_ids[i*bs:(i+1)*bs]
+            batch_attention_mask = attention_mask[i*bs:(i+1)*bs]
+            
+            batch_evaluation = self.metric.forward(batch_input_ids, batch_attention_mask)
+            
+            evaluation += batch_evaluation.tolist()
+
+        end = time.time()
+        print(f"Model runtime: {(end - start):.4f} seconds ({(len(src)/(end - start)):.2f} sent/s)")
+
+        return evaluation
         

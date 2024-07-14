@@ -16,6 +16,8 @@ ref = [
 def main():
     metric = MetricX(variation='metricx', size='l', batch_size=2)
 
+    print('Running...')
+
     res = metric(src=src, pred=pred, ref=ref)
 
     print(res)
