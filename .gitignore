@@ -1,4 +1,12 @@
+*.DS_Store
 *.pyc
 .vscode/launch.json
+
+# Exclude profiler util outputs
 *.coverage*
 *.xml
+*.txt
+*.svg
+*.prof
+*.dot
+*.png

@@ -25,6 +25,15 @@ def main():
     return res
 
 
+def profile_main():
+    import cProfile
+    from pstats import SortKey, Stats
+
+    cProfile.run('main()', 'profile.prof')
+    stats = Stats('profile.prof')
+    stats.strip_dirs().sort_stats(SortKey.CALLS)
+
+
 def test_main():
     res = main()
     # On CUDA: [3.2230851650238037, 2.6962885856628420]
@@ -32,4 +41,4 @@ def test_main():
     assert all(round(a, 5) == round(e, 5) for a, e in zip(res, [3.2230827, 2.6962897])), res
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__': profile_main() # main()

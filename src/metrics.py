@@ -44,7 +44,7 @@ class MetricX(Metric):
                 case 'xxl': model_id = "google/metricx-23-qe-xxl-v2p0"
         if model_id is None: raise NotImplementedError(f'MetricX variation {self.name} at size {size} not supported!')
 
-        device = torch.device("cuda")
+        device = torch.device("mps")
         self.tokenizer = AutoTokenizer.from_pretrained("google/mt5-xl", legacy=False, use_fast=True)
 
         self.metric = MT5ForMetricX.from_pretrained(model_id)
@@ -53,22 +53,6 @@ class MetricX(Metric):
 
     def prepare_inputs(self, src, pred, ref, max_input_length=1024):
         """Custom function for creating a MetricX dataset class using a lists for input."""
-        def _preprocess(batch):
-            # tokenize
-            batch = self.tokenizer(
-                batch['prompt'],
-                max_length=max_input_length,
-                truncation=True,
-                padding='max_length',
-                return_tensors='pt'
-            ).to(self.metric.device)
-
-            # remove EOS
-            batch["input_ids"] = batch["input_ids"][:, :-1]
-            batch["attention_mask"] = batch["attention_mask"][:, :-1]
-
-            return batch
-        
         # format src/pred/ref using prompt
         data = []
         if self.requires_references:
@@ -77,24 +61,26 @@ class MetricX(Metric):
                 if isinstance(r, list): 
                     assert len(r) == 1, f"MetricX only supports a single reference! Recieved: {r}"
                     r = r[0]
-                data += [{'prompt': f'candidate: {p} reference: {r}'}]
+                data += [f'candidate: {p} reference: {r}']
         else:
             for s, p in zip(src, pred):
-                data += [{'prompt': f'candidate: {p} source: {s}'}]
-
-        # tokenize in batches
-        ds = Dataset.from_list(data)
+                data += [f'candidate: {p} source: {s}']
         
         import time
         start = time.time()
 
-        ds = ds.map(_preprocess, batched=True, batch_size=1000)
-        ds.set_format(
-            type="torch",
-            columns=["input_ids", "attention_mask"],
-            device=self.metric.device,
-            output_all_columns=True,
-        )
+        # tokenize
+        ds = self.tokenizer(
+            data,
+            max_length=max_input_length,
+            truncation=True,
+            padding='max_length',
+            return_tensors='pt'
+        ).to(self.metric.device)
+
+        # remove EOS
+        ds["input_ids"] = ds["input_ids"][:, :-1]
+        ds["attention_mask"] = ds["attention_mask"][:, :-1]
 
         end = time.time()
         print(f"Dataset func time: {(end - start):.4f} seconds ({(len(src)/(end - start)):.2f} sent/s)")
@@ -126,3 +112,47 @@ class MetricX(Metric):
 
         return evaluation
         
+    def prepare_inputs_slow(self, src, pred, ref, max_input_length=1024):
+        """
+        Original implementation of prepare_inputs(), but the hashing for 
+        the map() function is prohibitively slow, where it may only make
+        sense for tokenizing 100K+ examples simultaneously.
+        """
+        def _preprocess(batch):
+            # tokenize
+            batch = self.tokenizer(
+                batch['prompt'],
+                max_length=max_input_length,
+                truncation=True,
+                padding='max_length',
+                return_tensors='pt'
+            ).to(self.metric.device)
+
+            # remove EOS
+            batch["input_ids"] = batch["input_ids"][:, :-1]
+            batch["attention_mask"] = batch["attention_mask"][:, :-1]
+
+            return batch
+        
+        data = []
+        if self.requires_references:
+            assert ref is not None
+            for s, p, r in zip(src, pred, ref):
+                if isinstance(r, list): 
+                    assert len(r) == 1, f"MetricX only supports a single reference! Recieved: {r}"
+                    r = r[0]
+                data += [{'prompt': f'candidate: {p} reference: {r}'}]
+        else:
+            for s, p in zip(src, pred):
+                data += [{'prompt': f'candidate: {p} source: {s}'}]
+
+        # tokenize in batches
+        ds = Dataset.from_list(data)
+
+        ds = ds.map(_preprocess, batched=True, batch_size=1000)
+        ds.set_format(
+            type="torch",
+            columns=["input_ids", "attention_mask"],
+            device=self.metric.device,
+            output_all_columns=True,
+        )
